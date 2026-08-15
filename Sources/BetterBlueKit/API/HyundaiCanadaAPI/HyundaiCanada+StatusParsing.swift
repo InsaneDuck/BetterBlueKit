@@ -18,6 +18,19 @@ extension HyundaiCanadaAPIClient {
             if status.hasPrefix("P") { return .phev }
             return .gas
         }
+        // `vhcllst` entries carry the powertrain as `fuelKindCode` ("G" gas,
+        // "E" electric, "P" plug-in hybrid) — the same codes Hyundai Europe
+        // uses. Without this branch every Canadian ICE vehicle fell through to
+        // the `.electric` default below, which hid its fuel range and gave it a
+        // phantom charge port (BetterBlue#98).
+        if let fuelKindCode = (vehicleData["fuelKindCode"] as? String)?.uppercased() {
+            switch fuelKindCode {
+            case "E", "EV": return .electric
+            case "P", "PE", "PHEV": return .phev
+            case "G", "GS", "D": return .gas
+            default: break
+            }
+        }
         if let fuelTypeNum: Int = extractNumber(from: vehicleData["fuelType"]) {
             return FuelType(number: fuelTypeNum)
         }
@@ -25,6 +38,15 @@ extension HyundaiCanadaAPIClient {
             if modelName.contains("ev") || modelName.contains("electric") { return .electric }
         }
         return .electric
+    }
+
+    /// Canada reports distance units as a JSON boolean (`true` = kilometers),
+    /// unlike the integer codes elsewhere. Accepts either shape and defaults to
+    /// kilometers, which is what this region actually serves.
+    func canadaDistanceUnits(from value: Any?) -> Distance.Units {
+        if let flag = value as? Bool { return flag ? .kilometers : .miles }
+        if let code: Int = extractNumber(from: value) { return Distance.Units(code) }
+        return .kilometers
     }
 
     func parseCanadaEVStatus(
@@ -64,11 +86,17 @@ extension HyundaiCanadaAPIClient {
             return nil
         }
 
-        if let distanceToEmpty = statusData["distanceToEmpty"] as? [String: Any],
+        // Canada names this `dte` ({"unit": true, "value": 314}); the
+        // `distanceToEmpty` spelling is kept as a fallback in case some
+        // firmware still uses it. Reading only the latter meant gas vehicles
+        // never showed a range even though the value was right there in the
+        // payload (BetterBlue#98).
+        let distanceToEmpty = (statusData["dte"] as? [String: Any])
+            ?? (statusData["distanceToEmpty"] as? [String: Any])
+        if let distanceToEmpty,
            let value: Double = extractNumber(from: distanceToEmpty["value"]) {
-            let unit: Int = extractNumber(from: distanceToEmpty["unit"]) ?? 1
             return VehicleStatus.FuelRange(
-                range: Distance(length: value, units: Distance.Units(unit)),
+                range: Distance(length: value, units: canadaDistanceUnits(from: distanceToEmpty["unit"])),
                 percentage: fuelLevel
             )
         }
